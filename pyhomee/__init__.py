@@ -23,16 +23,17 @@ class HomeeCube():
         self.groups = []
         self.relationships = []
         self.homeegrams = []
+
+        self._get_all()
         self.registry = SubscriptionRegistry(self)
         self.registry.start()
-        self._get_all()
 
     def _get_token(self):
         url = "http://{}:7681/access_token".format(self.hostname)
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
         form = {
-            "device_name": "Home Assistant",
+            "device_name": "Home Assistant 2",
             "device_hardware_id": "homeassistant",
             "device_os": 5,
             "device_type": 3,

@@ -116,7 +116,8 @@ class SubscriptionRegistry(object):
             return
         try:
             parsed = json.loads(message)
-        except:
+        except Exception as e:
+            _LOGGER.error("Failed to parse json: " + str(e))
             return
         if "all" in parsed:
             if "nodes" in parsed['all']:
