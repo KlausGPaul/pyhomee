@@ -3,11 +3,12 @@ import collections
 import json
 import logging
 import sched
-import time
 import threading
+import time
+
 import websocket
-from pyhomee.util import get_token
-from pyhomee.models import Attribute
+
+from pyhomee.models import Attribute, Node, Group
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -20,7 +21,8 @@ class SubscriptionRegistry(object):
         self.cube = cube
         self.hostname = cube.hostname
         self.connected = False
-        self._nodes = collections.defaultdict(list)
+        self._nodes = {}
+        self._groups = []
         self._callbacks = collections.defaultdict(list)
         self._exiting = False
         self._event_loop_thread = None
@@ -37,8 +39,7 @@ class SubscriptionRegistry(object):
             return
 
         _LOGGER.debug("Subscribing to events for %s", node)
-        self._nodes[node.id].append(node)
-        self._callbacks[node.id].append((callback))
+        self._callbacks[node.id].append(callback)
 
     def join(self):
         """Don't allow the main thread to terminate until we have."""
@@ -47,7 +48,7 @@ class SubscriptionRegistry(object):
     def start(self):
         """Start a thread to connect to homee websocket."""
         self._event_loop_thread = threading.Thread(target=self._run_event_loop,
-                                             name='Homee Event Loop Thread')
+                                                   name='Homee Event Loop Thread')
         self._event_loop_thread.deamon = True
         self._event_loop_thread.start()
         _LOGGER.info("Thread started")
@@ -66,6 +67,7 @@ class SubscriptionRegistry(object):
         _LOGGER.info("Terminated thread")
 
     def restart(self):
+        _LOGGER.info("Restarting homee websocket")
         try:
             self.stop()
         except:
@@ -99,16 +101,15 @@ class SubscriptionRegistry(object):
 
     def _run_event_loop(self):
         token = self.cube.get_token()
-        #websocket.enableTrace(True)
         self.ws = websocket.WebSocketApp("ws://{}:7681/connection?access_token={}".format(self.hostname, token),
-                                  subprotocols = ["v2"],
-                                  on_message = self.on_message,
-                                  on_error = self.on_error,
-                                  on_close = self.on_close)
+                                         subprotocols=["v2"],
+                                         on_message=self.on_message,
+                                         on_error=self.on_error,
+                                         on_close=self.on_close)
         self.ws.on_open = self.on_open
         self.ws.run_forever()
 
-    def on_message(self, ws, message):
+    def on_message(self, message):
         if message == 'pong':
             self.connected = True
             _LOGGER.debug("pong received")
@@ -117,21 +118,41 @@ class SubscriptionRegistry(object):
             parsed = json.loads(message)
         except:
             return
+        if "all" in parsed:
+            if "nodes" in parsed['all']:
+                for node in parsed['all']['nodes']:
+                    self._parse_node(node)
+            if "groups" in parsed['all']:
+                for group in parsed['all']['group']["groups"]:
+                    self.groups.append(Group(group))
+
+        if "node" in parsed:
+            self._parse_node(parsed['node'])
+
         if "attribute" in parsed:
             attribute = Attribute(parsed["attribute"])
             if attribute.node_id in self._callbacks:
                 for callback in self._callbacks[attribute.node_id]:
-                    callback(attribute)
+                    callback(None, attribute)
         else:
             pass
 
-    def on_error(self, ws, error):
+    def _parse_node(self, parsed):
+        node = Node(parsed)
+        self._nodes[node.id] = node
+
+        if node.id in self._callbacks:
+            for callback in self._callbacks[node.id]:
+                callback(node, None)
+
+    def on_error(self, error):
+        _LOGGER.error("Websocket Error %s", error)
         self.restart()
 
-    def on_close(self, ws):
+    def on_close(self):
         pass
 
-    def on_open(self, ws):
+    def on_open(self):
         _LOGGER.info("Websocket opened")
         self.connected = True
         self.ping()
