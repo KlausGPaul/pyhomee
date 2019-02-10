@@ -1,9 +1,9 @@
 from setuptools import setup, find_packages
 
 setup(name='pyhomee',
-      version='0.0.2',
+      version='0.0.3',
       description='Access Homee Websocket API',
-      url='http://github.com/twendt/pyhomee',
+      url='http://github.com/Marmelatze/pyhomee',
       author='Timo Wendt',
       license='MIT',
       install_requires=['websocket-client>=0.44.0', 'requests'],
