@@ -1,12 +1,16 @@
 """Module to listen for homee events."""
+import asyncio
 import collections
 import json
 import logging
 import sched
+import socket
+import ssl
 import threading
 import time
+from asyncio import CancelledError
 
-import websocket
+import websockets
 
 from pyhomee.models import Attribute, Node, Group
 
@@ -16,17 +20,63 @@ _LOGGER = logging.getLogger(__name__)
 class SubscriptionRegistry(object):
     """Class for subscribing to homee events."""
 
-    def __init__(self, cube):
+    def __init__(self, cube, loop=None):
         """Setup websocket."""
+        self.ws = None
         self.cube = cube
         self.hostname = cube.hostname
         self.connected = False
         self._nodes = {}
         self._groups = []
-        self._callbacks = collections.defaultdict(list)
+        self._node_callbacks = collections.defaultdict(list)
+        self._callbacks = list()
         self._exiting = False
         self._event_loop_thread = None
-        self.ping_scheduler = sched.scheduler(time.time, time.sleep)
+        self._loop = loop or asyncio.get_event_loop()
+        # self.ping_scheduler = sched.scheduler(time.time, time.sleep)
+
+    async def run(self):
+        token = None
+        while True:
+            try:
+                token = await self.cube.get_token()
+                break  # stop retrying
+            except Exception as e:
+                _LOGGER.error("Failed to get homee token, trying again later: %s", e)
+                await asyncio.sleep(30)
+
+        uri = "ws://{}:7681/connection?access_token={}".format(self.hostname, token)
+        while True:
+            try:
+                self.connection = websockets.connect(uri, subprotocols=["v2"])
+                async with self.connection as ws:
+                    self.ws = ws
+                    _LOGGER.info("Connected to websocket")
+                    await ws.send(str("GET:all"))
+                    while True:
+                        try:
+                            message = await ws.recv()
+                        except(asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
+                            try:
+                                pong = await ws.ping()
+                                await asyncio.wait_for(pong, timeout=30)
+                                _LOGGER.debug('Ping OK, keeping connection alive...')
+                                continue
+                            except:
+                                await asyncio.sleep(10)
+                                break  # inner loop
+
+                        await self.on_message(message)
+            except socket.gaierror:
+                _LOGGER.error("Websocket connection failed")
+                continue
+            except ConnectionRefusedError:
+                # log something else
+                _LOGGER.error("Websocket connection refused")
+                continue
+            except CancelledError:
+                _LOGGER.error("Websocket client stopped")
+                break
 
     def register(self, node, callback):
         """Register a callback.
@@ -39,65 +89,38 @@ class SubscriptionRegistry(object):
             return
 
         _LOGGER.debug("Subscribing to events for %s", node)
-        self._callbacks[node.id].append(callback)
+        self._node_callbacks[node.id].append(callback)
 
-    def join(self):
-        """Don't allow the main thread to terminate until we have."""
-        self._event_loop_thread.join()
+    def register_all(self, callback):
+        """Register a callback to all received events
+
+
+        callback: callback for notification of changes
+        """
+
+        _LOGGER.debug("Subscribing to all events %s")
+        self._callbacks.append(callback)
 
     def start(self):
         """Start a thread to connect to homee websocket."""
-        self._event_loop_thread = threading.Thread(target=self._run_event_loop,
-                                                   name='Homee Event Loop Thread')
-        self._event_loop_thread.deamon = True
-        self._event_loop_thread.start()
+        # self._loop.set_debug(True)
+        self._loop.run_until_complete(self.run())
+        self._loop.run_forever()
+        self._loop.close()
         _LOGGER.info("Thread started")
 
-    def stop(self):
-        """Tell the event loop thread to terminate."""
+    async def send_command(self, command):
         try:
-            self.ws.close()
-        except:
-            pass
-        try:
-            self.ping_scheduler.cancel(self.ping_event)
-        except:
-            pass
-        self.join()
-        _LOGGER.info("Terminated thread")
-
-    def restart(self):
-        _LOGGER.info("Restarting homee websocket")
-        try:
-            self.stop()
-        except:
-            pass
-        time.sleep(10)
-        self.start()
-
-    def ping(self):
-        if self.connected:
-            _LOGGER.debug("Sending ping")
-            self.connected = False
-            self.send_command('ping')
-            self.ping_event = self.ping_scheduler.enter(10, 1, self.ping)
-            self.ping_scheduler.run(False)
-        else:
-            _LOGGER.debug("Ping: Calling restart")
-            self.restart()
-
-    def send_command(self, command):
-        try:
-            self.ws.send(command)
+            await self.ws.send(command)
         except:
             _LOGGER.info("Sending command failed, restarting")
-            self.restart()
 
-    def send_node_command(self, node, attribute, target_value):
-        self.send_command("PUT:nodes/{}/attributes/{}?target_value={}".format(node.id, attribute.id, target_value))
+    async def send_node_command(self, node, attribute, target_value):
+        return await self.send_command(
+            "PUT:nodes/{}/attributes/{}?target_value={}".format(node.id, attribute.id, target_value))
 
-    def play_homeegram(self, id):
-        self.send_command("PUT:homeegrams/{}?play=1".format(id))
+    async def play_homeegram(self, id):
+        return await self.send_command("PUT:homeegrams/{}?play=1".format(id))
 
     def _run_event_loop(self):
         token = self.cube.get_token()
@@ -109,7 +132,7 @@ class SubscriptionRegistry(object):
         self.ws.on_open = self.on_open
         self.ws.run_forever()
 
-    def on_message(self, message):
+    async def on_message(self, message):
         if message == 'pong':
             self.connected = True
             _LOGGER.debug("pong received")
@@ -124,27 +147,29 @@ class SubscriptionRegistry(object):
                 for node in parsed['all']['nodes']:
                     self._parse_node(node)
             if "groups" in parsed['all']:
-                for group in parsed['all']['group']["groups"]:
-                    self.groups.append(Group(group))
+                for group in parsed['all']['groups']:
+                    self._groups.append(Group(group))
 
         if "node" in parsed:
             self._parse_node(parsed['node'])
 
         if "attribute" in parsed:
             attribute = Attribute(parsed["attribute"])
-            if attribute.node_id in self._callbacks:
-                for callback in self._callbacks[attribute.node_id]:
-                    callback(None, attribute)
+            if attribute.node_id in self._node_callbacks:
+                for callback in self._node_callbacks[attribute.node_id]:
+                    self._loop.create_task(callback(None, attribute))
         else:
             pass
 
     def _parse_node(self, parsed):
         node = Node(parsed)
         self._nodes[node.id] = node
+        for callback in self._callbacks:
+            self._loop.create_task(callback(node))
 
-        if node.id in self._callbacks:
-            for callback in self._callbacks[node.id]:
-                callback(node, None)
+        if node.id in self._node_callbacks:
+            for callback in self._node_callbacks[node.id]:
+                self._loop.create_task(callback(node, None))
 
     def on_error(self, error):
         _LOGGER.error("Websocket Error %s", error)

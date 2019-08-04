@@ -1,10 +1,14 @@
 import hashlib
-import websocket
+import asyncio
+import websockets
 import time
 import json
-import requests
+import aiohttp
 import urllib
 import logging
+
+from aiohttp import BasicAuth
+
 from pyhomee.util import get_token
 from pyhomee.models import Node, Group, Homeegram, Relationship
 from pyhomee.subscribe import SubscriptionRegistry
@@ -14,21 +18,21 @@ _LOGGER = logging.getLogger(__name__)
 
 class HomeeCube():
 
-    def __init__(self, hostname, username, password):
+    def __init__(self, hostname, username, password, loop=None):
         self.hostname = hostname
         self.username = username
         self.password = password
-        self.token = self._get_token()
+        self.token = None
         self.nodes = []
         self.groups = []
         self.relationships = []
         self.homeegrams = []
+        self.session = aiohttp.ClientSession()
 
-        self._get_all()
-        self.registry = SubscriptionRegistry(self)
-        self.registry.start()
+        #self._get_all()
+        self.registry = SubscriptionRegistry(self, loop=loop)
 
-    def _get_token(self):
+    async def _get_token(self):
         url = "http://{}:7681/access_token".format(self.hostname)
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
@@ -39,56 +43,25 @@ class HomeeCube():
             "device_type": 3,
             "device_app": 1
         }
-        auth = (self.username, hashlib.sha512(self.password.encode('utf-8')).hexdigest())
-        r = requests.post(url, auth=auth, data=form, headers=headers)
+        _LOGGER.info("STart get token")
+        auth = BasicAuth(self.username, hashlib.sha512(self.password.encode('utf-8')).hexdigest())
         try:
-            token = r.text.split("&")[0].split("=")[1]
+            r = await self.session.post(url, auth=auth, data=form, headers=headers, timeout=5)
+        except asyncio.TimeoutError:
+            raise Exception("Unable to connect to homee")
+        _LOGGER.info("Finished")
+        try:
+            token = (await r.text()).split("&")[0].split("=")[1]
+            _LOGGER.info(token)
         except:
             raise Exception("Authenticationfailed")
         return token
 
-    def get_token(self):
+    async def get_token(self):
+        if self.token is not None:
+            return self.token
+        self.token = await self._get_token()
         return self.token
-
-    def _get_all(self):
-        ws = websocket.create_connection("ws://{}:7681/connection?access_token={}".format(self.hostname, self.token),
-                                         subprotocols=["v2"])
-        ws.send("GET:all")
-        nodes = ws.recv()
-        ws.close()
-        try:
-            parsed = json.loads(nodes)
-        except:
-            return
-        self.all_config = parsed["all"]
-        self._get_nodes()
-        self._get_groups()
-        self._get_relationships()
-        self._get_homeegrams()
-
-    def _get_nodes(self):
-        if "nodes" in self.all_config:
-            for node in self.all_config["nodes"]:
-                self.nodes.append(Node(node))
-        return
-
-    def _get_groups(self):
-        if "groups" in self.all_config:
-            for group in self.all_config["groups"]:
-                self.groups.append(Group(group))
-        return
-
-    def _get_relationships(self):
-        if "relationships" in self.all_config:
-            for relationship in self.all_config["relationships"]:
-                self.relationships.append(Relationship(relationship))
-        return
-
-    def _get_homeegrams(self):
-        if "homeegrams" in self.all_config:
-            for homeegram in self.all_config["homeegrams"]:
-                self.homeegrams.append(Homeegram(homeegram))
-        return
 
     def get_nodes(self):
         return self.nodes
@@ -118,11 +91,17 @@ class HomeeCube():
     def register(self, node, callback):
         self.registry.register(node, callback)
 
-    def send_node_command(self, node, attribute, target_value):
-        self.registry.send_node_command(node, attribute, target_value)
+    def register_all(self, callback):
+        self.registry.register_all(callback)
 
-    def play_homeegram(self, id):
-        self.registry.play_homeegram(id)
+    async def send_node_command(self, node, attribute, target_value):
+        await self.registry.send_node_command(node, attribute, target_value)
+
+    async def play_homeegram(self, id):
+        await self.registry.play_homeegram(id)
 
     def stop(self):
         self.registry.stop()
+
+    def run(self):
+        return self.registry.run()

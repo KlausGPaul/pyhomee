@@ -147,7 +147,6 @@ PROFILE_TYPES = {
                       CANodeProfileDoubleOnOffSwitch, CANodeProfileMeteringSwitch, CANodeProfileOnOffPlug,
                       CANodeProfileDimmablePlug, CANodeProfileDimmableMeteringPlug, CANodeProfileMeteringPlug]
 
-
 }
 
 ATTRIBUTE_TYPES = {
@@ -397,7 +396,6 @@ ATTRIBUTE_TYPES = {
     'CurrentLocalGustSpeed': 263,
 }
 
-
 ATTRIBUTE_TYPES_LOOKUP = {v: k for k, v in ATTRIBUTE_TYPES.items()}
 
 CANodeStateNone = 0,
@@ -410,6 +408,13 @@ CANodeStateUserInteractionRequired = 6
 CANodeStatePasswordRequired = 7
 CANodeStateHostUnavailable = 8
 CANodeStateDeleteInProgress = 9
-CANodeStateCosiConnected: 10
+CANodeStateCosiConnected = 10
 CANodeStateBlocked = 11
 CANodeStateWaitingForWakeup = 12
+
+HomeeMode = {
+    'home': 0,
+    'sleeping': 1,
+    'away': 2,
+    'vacation': 3,
+}
